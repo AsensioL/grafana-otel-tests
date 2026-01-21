@@ -27,6 +27,14 @@ services:
       - ./loki.yml:/etc/loki/loki.yml
     ports:
       - "3100:3100"
+  tempo:
+    image: grafana/tempo:latest
+    command: [ "-config.file=/etc/tempo/tempo.yml" ]
+    volumes:
+      - ./tempo.yml:/etc/tempo/tempo.yml
+      # - tempo-data:/var/tempo
+    ports:
+      - "3200:3200"   # Tempo HTTP / query API (Grafana uses this)
 
   alloy:
     image: grafana/alloy:latest
