@@ -22,3 +22,7 @@ datasources:
     access: proxy
     url: http://tempo:3200
     isDefault: false
+    jsonData:
+      streamingEnabled:
+        search: true
+        metrics: true

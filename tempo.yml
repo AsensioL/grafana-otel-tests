@@ -31,3 +31,36 @@ storage:
       path: /var/tempo
     wal:
       path: /var/tempo/wal
+
+# Add support for streaming traces over HTTP
+stream_over_http_enabled: true
+
+# Add metric generator for traces
+metrics_generator:
+  registry:
+    external_labels:
+      source: tempo
+      cluster: production
+
+  storage:
+    path: /var/tempo/generator/wal
+    remote_write:
+      - url: http://prometheus:9090/api/v1/write
+        send_exemplars: true
+
+  processor:
+    span_metrics:
+      # These dimensions allow you to filter metrics by service or operation
+      dimensions:
+        - http.method
+        - http.status_code
+        - db.system
+    service_graphs:
+      max_items: 10000
+    local_blocks:
+      # Required for TraceQL metrics and metric queries within Tempo
+      filter_server_spans: true
+overrides:
+  defaults:
+    metrics_generator:
+      processors: [service-graphs, span-metrics, local-blocks]
