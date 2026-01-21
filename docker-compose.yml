@@ -19,7 +19,10 @@ services:
 
   loki:
     image: grafana/loki:latest
-    command: -config.file=/etc/loki/local-config.yaml
+    # command: -config.file=/etc/loki/local-config.yaml
+    command: -config.file=/etc/loki/loki.yml
+    volumes:
+      - ./loki.yml:/etc/loki/loki.yml
     ports:
       - "3100:3100"
 
