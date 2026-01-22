@@ -1,6 +1,6 @@
 services:
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:12.3.1
     ports:
       - "3000:3000"
     volumes:
@@ -10,7 +10,7 @@ services:
       - loki
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.9.1
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--web.enable-remote-write-receiver'
@@ -20,7 +20,7 @@ services:
       - "9090:9090"
 
   loki:
-    image: grafana/loki:latest
+    image: grafana/loki:3.6
     # command: -config.file=/etc/loki/local-config.yaml
     command: -config.file=/etc/loki/loki.yml
     volumes:
@@ -28,7 +28,7 @@ services:
     ports:
       - "3100:3100"
   tempo:
-    image: grafana/tempo:latest
+    image: grafana/tempo:main-de87f58 # see GitHub tag v2.10.0-rc.0
     command: [ "-config.file=/etc/tempo/tempo.yml" ]
     volumes:
       - ./tempo.yml:/etc/tempo/tempo.yml
@@ -37,7 +37,7 @@ services:
       - "3200:3200"   # Tempo HTTP / query API (Grafana uses this)
 
   alloy:
-    image: grafana/alloy:latest
+    image: grafana/alloy:v1.12.2
     command: run /etc/alloy/config.alloy --server.http.listen-addr=0.0.0.0:12345
     volumes:
       - ./config.alloy:/etc/alloy/config.alloy
