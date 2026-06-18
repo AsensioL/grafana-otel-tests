@@ -8,7 +8,7 @@
 # softwareupdate --install-rosetta # may be necessary
 brew install docker
 brew install colima
-colima start
+colima start # Re run after a computer reboot (it is a service)
 brew install docker-compose
 # IMPORTANT: Follow instructions after running brew install docker-compose to enable the feature
 
@@ -37,7 +37,7 @@ I later found additional examples/sources to help with this (first link):
   - https://grafana.com/docs/grafana/latest/datasources/prometheus/configure/#provision-the-prometheus-data-source
   - https://grafana.com/docs/grafana/latest/datasources/loki/#provisioning-examples
   - https://grafana.com/docs/grafana/latest/datasources/tempo/configure-tempo-data-source/#example-file
--
+- Configuration details for `config.alloy`: https://grafana.com/docs/alloy/latest/reference/components/otelcol/otelcol.exporter.otlp/
 
 # Python Telemetry (with automatic & manual instrumentation)
 
@@ -70,10 +70,11 @@ opentelemetry-instrument \
 
 ```python
 export OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED=true
+export OTEL_METRIC_EXPORT_INTERVAL=1000
 opentelemetry-instrument \
     --metrics_exporter otlp \
     --logs_exporter otlp \
-    --logs_exporter otlp \
+    --traces_exporter otlp \
     --service_name dice-server \
     flask run -p 8080
 ```
