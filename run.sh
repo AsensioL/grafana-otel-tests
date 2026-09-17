@@ -6,7 +6,7 @@ compose_file="${root}/docker/compose.yaml"
 env_file="${root}/docker/.env"
 
 if [[ $# -eq 0 ]]; then
-  set -- up
+  set -- up -d
 fi
 
 if [[ ! -f "${env_file}" ]]; then

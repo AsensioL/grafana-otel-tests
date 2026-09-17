@@ -1,5 +1,11 @@
 name: grafana-otel-tests
 
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   grafana:
     image: grafana/grafana:12.3.1
@@ -18,6 +24,7 @@ services:
     volumes:
       - grafana-data:/var/lib/grafana
       - ./config/grafana/provisioning:/etc/grafana/provisioning
+    logging: *default-logging
     depends_on:
       - prometheus
       - loki
@@ -31,6 +38,7 @@ services:
     volumes:
       - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
       - prometheus-data:/prometheus
+    logging: *default-logging
     # ports:
     #   - "9090:9090" # Don't expose web portal
 
@@ -41,6 +49,7 @@ services:
     volumes:
       - ./config/loki/loki.yml:/etc/loki/loki.yml
       - loki-data:/loki
+    logging: *default-logging
     # ports:
     #   - "3100:3100" # Don't expose web portal
 
@@ -61,6 +70,7 @@ services:
     volumes:
       - ./config/tempo/tempo.yml:/etc/tempo/tempo.yml
       - tempo-data:/var/tempo # see tempo-init volume fix
+    logging: *default-logging
     # ports:
     #   - "3200:3200" # Don't expose Tempo HTTP / query API (Grafana uses this internally)
 
@@ -69,6 +79,7 @@ services:
     command: run /etc/alloy/config.alloy --server.http.listen-addr=0.0.0.0:12345
     volumes:
       - ./config/alloy/config.alloy:/etc/alloy/config.alloy
+    logging: *default-logging
     ports:
       - "127.0.0.1:4317:4317" # App runs on this machine, so only expose these to localhost
       - "127.0.0.1:4318:4318" # App runs on this machine, so only expose these to localhost
