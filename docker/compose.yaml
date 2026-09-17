@@ -16,6 +16,7 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "false"
       GF_PLUGINS_PLUGIN_ADMIN_ENABLED: "false"
     volumes:
+      - grafana-data:/var/lib/grafana
       - ./config/grafana/provisioning:/etc/grafana/provisioning
     depends_on:
       - prometheus
@@ -26,8 +27,10 @@ services:
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--web.enable-remote-write-receiver'
+      - '--storage.tsdb.retention.time=30d'
     volumes:
       - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
     # ports:
     #   - "9090:9090" # Don't expose web portal
 
@@ -37,15 +40,27 @@ services:
     command: -config.file=/etc/loki/loki.yml
     volumes:
       - ./config/loki/loki.yml:/etc/loki/loki.yml
+      - loki-data:/loki
     # ports:
     #   - "3100:3100" # Don't expose web portal
+
+# Tempo image is a distroless image (lacks CMD tools, runs as user instead of
+  # root), and using a volume at /var/tempo causes the folder to be owned by
+  # root (uid=0), however Tempo needs to its owner (uid=10001).
+  # This container fixes the folder ownership issue during start up
+  tempo-init:
+    image: busybox:1.37
+    user: root
+    command: ["chown", "-R", "10001:10001", "/var/tempo"]
+    volumes:
+      - tempo-data:/var/tempo
 
   tempo:
     image: grafana/tempo:main-de87f58 # see GitHub tag v2.10.0-rc.0
     command: [ "-config.file=/etc/tempo/tempo.yml" ]
     volumes:
       - ./config/tempo/tempo.yml:/etc/tempo/tempo.yml
-      # - tempo-data:/var/tempo
+      - tempo-data:/var/tempo # see tempo-init volume fix
     # ports:
     #   - "3200:3200" # Don't expose Tempo HTTP / query API (Grafana uses this internally)
 
@@ -58,3 +73,9 @@ services:
       - "127.0.0.1:4317:4317" # App runs on this machine, so only expose these to localhost
       - "127.0.0.1:4318:4318" # App runs on this machine, so only expose these to localhost
       # - "12345:12345" # Don't expose web portal
+
+volumes:
+  grafana-data:
+  prometheus-data:
+  loki-data:
+  tempo-data:

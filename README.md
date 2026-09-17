@@ -39,12 +39,32 @@ service name in `docker/compose.yaml`).
 
 From the repository root:
 
-* Start (detached) with
-  * `./run.sh`
-  * or `docker compose -f docker/compose.yaml --env-file docker/.env up`
+* Start with
+  * `docker compose -f docker/compose.yaml up`
+  * or `./run.sh`
 * Stop (without deleting data) with
   * `docker compose -f docker/compose.yaml down`
   * or `./run.sh down`
+
+## Docker Data Retention (volumes)
+
+Grafana dashboards and Prometheus/Loki/Tempo data live in named Docker volumes
+(`grafana-data`, `prometheus-data`, `loki-data`, `tempo-data`).
+
+### Managing retained data (keep/delete)
+
+Stopping docker compose with `./run.sh down` leaves the volumes in place.
+To delete those volumes (irreversible: metrics, logs, traces, and Grafana state):
+
+```bash
+./run.sh down -v
+# or:
+docker compose -f docker/compose.yaml --env-file docker/.env down -v
+```
+
+List leftover volumes with `docker volume ls` and remove one by name with
+`docker volume rm grafana-otel-tests_grafana-data` (project prefix plus the
+volume name).
 
 ## Settings documentation for docker-compose improvements
 
