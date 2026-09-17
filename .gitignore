@@ -4,5 +4,9 @@ __pycache__/
 .venv/
 venv/
 
+# Secrets
+.env
+docker/.env
+
 # Local archives
 git.tar.gz

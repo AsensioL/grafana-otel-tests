@@ -39,10 +39,10 @@ service name in `docker/compose.yaml`).
 
 From the repository root:
 
-* Start with
-  * `docker compose -f docker/compose.yaml up`
-  * or `./run.sh`
-* Stop with
+* Start (detached) with
+  * `./run.sh`
+  * or `docker compose -f docker/compose.yaml --env-file docker/.env up`
+* Stop (without deleting data) with
   * `docker compose -f docker/compose.yaml down`
   * or `./run.sh down`
 
