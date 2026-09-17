@@ -1,1 +1,8 @@
-*.pyc
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local archives
+git.tar.gz

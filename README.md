@@ -1,3 +1,18 @@
+# Grafana OTel tests
+
+```
+run.sh                  # start (or pass through) docker compose
+python/                 # Flask and OTLP example apps
+docker/
+  compose.yaml          # Grafana, Prometheus, Loki, Tempo, Alloy
+  config/               # per-service container config
+    alloy/
+    grafana/provisioning/datasources/
+    loki/
+    prometheus/
+    tempo/
+```
+
 # Docker Compose
 
 ## Docker Compose Installation
@@ -18,11 +33,18 @@ docker run --rm hello-world
 
 ## Docker Compose use
 
-Docker Compose groups all the Docker container so they all run at the same time and
+Docker Compose groups all the Docker containers so they all run at the same time and
 see each other as if on the same network (they resolve each other's hostname from their
-`docker-compose.yml` name).
-* Start with `docker compose up`
-* Stop with `docker compose down`
+service name in `docker/compose.yaml`).
+
+From the repository root:
+
+* Start with
+  * `docker compose -f docker/compose.yaml up`
+  * or `./run.sh`
+* Stop with
+  * `docker compose -f docker/compose.yaml down`
+  * or `./run.sh down`
 
 ## Settings documentation for docker-compose improvements
 
@@ -33,11 +55,11 @@ I later found additional examples/sources to help with this (first link):
 - Enable Tempo HTTP streaming (required for TraceQL): https://grafana.com/docs/tempo/latest/metrics-from-traces/metrics-queries/configure-traceql-metrics/#activate-and-configure-the-local-blocks-processor
 - Enable Tempo TraceQL metrics: https://grafana.com/docs/tempo/latest/metrics-from-traces/metrics-queries/configure-traceql-metrics/#activate-and-configure-the-local-blocks-processor
 - Grafana Data sources: https://grafana.com/docs/grafana/latest/administration/provisioning/#data-sources
-- How to configure each data source (`grafana-datasources.yml`):
+- How to configure each data source (`docker/config/grafana/provisioning/datasources/datasources.yml`):
   - https://grafana.com/docs/grafana/latest/datasources/prometheus/configure/#provision-the-prometheus-data-source
   - https://grafana.com/docs/grafana/latest/datasources/loki/#provisioning-examples
   - https://grafana.com/docs/grafana/latest/datasources/tempo/configure-tempo-data-source/#example-file
-- Configuration details for `config.alloy`: https://grafana.com/docs/alloy/latest/reference/components/otelcol/otelcol.exporter.otlp/
+-
 
 # Python Telemetry (with automatic & manual instrumentation)
 
@@ -50,13 +72,14 @@ python -m venv .venv
 .venv/bin/activate
 
 # Installation basics
-pip3 install -r requirements.txt
+pip3 install -r python/requirements.txt
 opentelemetry-bootstrap -a install
 ```
 
 ## Use Flask example (telemetry sent to console)
 
 ```python
+cd python
 export OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED=true
 opentelemetry-instrument \
     --metrics_exporter console \
@@ -69,12 +92,12 @@ opentelemetry-instrument \
 ## Use Flask example (telemetry sent to OTLP)
 
 ```python
+cd python
 export OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED=true
-export OTEL_METRIC_EXPORT_INTERVAL=1000
 opentelemetry-instrument \
     --metrics_exporter otlp \
     --logs_exporter otlp \
-    --traces_exporter otlp \
+    --logs_exporter otlp \
     --service_name dice-server \
     flask run -p 8080
 ```
