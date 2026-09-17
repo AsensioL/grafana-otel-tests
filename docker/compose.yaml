@@ -18,8 +18,8 @@ services:
       - '--web.enable-remote-write-receiver'
     volumes:
       - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
-    ports:
-      - "9090:9090"
+    # ports:
+    #   - "9090:9090" # Don't expose web portal
 
   loki:
     image: grafana/loki:3.6
@@ -27,8 +27,8 @@ services:
     command: -config.file=/etc/loki/loki.yml
     volumes:
       - ./config/loki/loki.yml:/etc/loki/loki.yml
-    ports:
-      - "3100:3100"
+    # ports:
+    #   - "3100:3100" # Don't expose web portal
 
   tempo:
     image: grafana/tempo:main-de87f58 # see GitHub tag v2.10.0-rc.0
@@ -36,8 +36,8 @@ services:
     volumes:
       - ./config/tempo/tempo.yml:/etc/tempo/tempo.yml
       # - tempo-data:/var/tempo
-    ports:
-      - "3200:3200"   # Tempo HTTP / query API (Grafana uses this)
+    # ports:
+    #   - "3200:3200" # Don't expose Tempo HTTP / query API (Grafana uses this internally)
 
   alloy:
     image: grafana/alloy:v1.12.2
@@ -45,6 +45,6 @@ services:
     volumes:
       - ./config/alloy/config.alloy:/etc/alloy/config.alloy
     ports:
-      - "4317:4317"
-      - "4318:4318"
-      - "12345:12345"
+      - "127.0.0.1:4317:4317" # App runs on this machine, so only expose these to localhost
+      - "127.0.0.1:4318:4318" # App runs on this machine, so only expose these to localhost
+      # - "12345:12345" # Don't expose web portal
