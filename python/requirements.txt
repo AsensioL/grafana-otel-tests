@@ -5,4 +5,4 @@ opentelemetry-exporter-otlp==1.39.1
 opentelemetry-instrumentation==0.60b1
 opentelemetry-semantic-conventions==0.60b1
 opentelemetry-distro==0.60b1
-
+requests

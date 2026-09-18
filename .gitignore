@@ -8,5 +8,6 @@ venv/
 .env
 docker/.env
 
-# Local archives
-git.tar.gz
+# Backups
+backups/
+*.tar.gz

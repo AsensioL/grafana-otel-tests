@@ -2,13 +2,15 @@
 
 ```
 run.sh                  # start (or pass through) docker compose
-python/                 # Flask and OTLP example apps
+python/                 # Flask and OTLP example apps (run on the host)
 docker/
   compose.yaml          # Grafana, Prometheus, Loki, Tempo, Alloy
+  .env.example          # copy to docker/.env
   config/               # per-service container config
     alloy/
     grafana/provisioning/datasources/
     loki/
+    nginx/              # example snippets for upstream nginx (not run here)
     prometheus/
     tempo/
 ```
@@ -66,6 +68,25 @@ List leftover volumes with `docker volume ls` and remove one by name with
 `docker volume rm grafana-otel-tests_grafana-data` (project prefix plus the
 volume name).
 
+## VPS (behind existing nginx)
+
+TLS terminates on an upstream nginx that proxies to **this host on port 3000**.
+Compose does not publish Prometheus (`9090`), Loki (`3100`), Tempo (`3200`), or
+the Alloy UI (`12345`). Only Grafana is reachable from nginx. OTLP is bound to
+localhost so apps on this machine can send telemetry; it is not on the internet.
+
+1. Copy `docker/.env.example` to `docker/.env` and set `GRAFANA_DOMAIN` (the
+   public HTTPS hostname), `GRAFANA_ADMIN_USER`, and `GRAFANA_ADMIN_PASSWORD`.
+2. Merge the headers in `docker/config/nginx/grafana.conf.example` into the
+   existing nginx `server` block (`Host`, `X-Forwarded-Proto: https`, WebSocket
+   upgrade). Do not change the `proxy_pass` port if it already targets 3000.
+3. From the repository root: `./run.sh` (fails if `docker/.env` is missing).
+4. Open `https://$GRAFANA_DOMAIN` and sign in with the admin user from `.env`.
+
+Apps on the VPS should export OTLP to `http://127.0.0.1:4317` (gRPC) or
+`http://127.0.0.1:4318` (HTTP). Python examples in `python/` are host-side
+tools, not Compose services.
+
 ## Settings documentation for docker-compose improvements
 
 Most of the existing settings come from talking to ChatGPT, Gemini, online documentation
@@ -111,13 +132,16 @@ opentelemetry-instrument \
 
 ## Use Flask example (telemetry sent to OTLP)
 
+Requires the stack (`./run.sh`). Exporters default to localhost OTLP
+(`127.0.0.1:4317` / `4318`).
+
 ```python
 cd python
 export OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED=true
 opentelemetry-instrument \
     --metrics_exporter otlp \
     --logs_exporter otlp \
-    --logs_exporter otlp \
+    --traces_exporter otlp \
     --service_name dice-server \
     flask run -p 8080
 ```
