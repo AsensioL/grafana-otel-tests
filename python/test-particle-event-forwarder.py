@@ -6,10 +6,12 @@ import logging
 import os
 import socket
 import sys
+import threading
 import unittest
 import uuid
 from pathlib import Path
-from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
+from unittest.mock import MagicMock, patch
 
 from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
 from opentelemetry.sdk._logs.export import (
@@ -33,8 +35,14 @@ DEFAULT_OTLP_ENDPOINT = _forwarder.DEFAULT_OTLP_ENDPOINT
 PARTICLE_LOGGER_NAME = _forwarder.PARTICLE_LOGGER_NAME
 TOOL_LOGGER_NAME = _forwarder.TOOL_LOGGER_NAME
 ParticleEventParser = _forwarder.ParticleEventParser
+DeviceList = _forwarder.DeviceList
 configure_logging = _forwarder.configure_logging
+fetch_product_devices = _forwarder.fetch_product_devices
+_forward_event = _forwarder._forward_event
+DEVICE_FIELD_MISSING = _forwarder.DEVICE_FIELD_MISSING
 require_env = _forwarder.require_env
+DEVICES_PER_PAGE = _forwarder.DEVICES_PER_PAGE
+PARTICLE_API_BASE = _forwarder.PARTICLE_API_BASE
 
 
 SAMPLE_EVENT = {
@@ -228,6 +236,49 @@ class ConfigureLoggingTests(unittest.TestCase):
             self.assertIn(key, tool_attrs)
 
 
+class ForwardEventTests(unittest.TestCase):
+    def setUp(self):
+        self.exporter = InMemoryLogRecordExporter()
+        self.provider, _tool_logger, self.particle_logger = configure_logging(
+            log_record_processor=SimpleLogRecordProcessor(self.exporter)
+        )
+
+    def tearDown(self):
+        self.provider.shutdown()
+        _quiet_tool_loggers()
+
+    def _attrs(self):
+        logs = self.exporter.get_finished_logs()
+        self.assertEqual(len(logs), 1)
+        return dict(logs[0].log_record.attributes)
+
+    def test_includes_device_name_and_joined_groups(self):
+        devices = {
+            SAMPLE_EVENT["coreid"]: {
+                "id": SAMPLE_EVENT["coreid"],
+                "name": "front-door",
+                "groups": ["prod", "west"],
+            }
+        }
+        _forward_event(self.particle_logger, SAMPLE_EVENT, devices)
+        attrs = self._attrs()
+        self.assertEqual(attrs["device_name"], "front-door")
+        self.assertEqual(attrs["device_groups"], "prod,west")
+
+    def test_missing_device_or_fields_are_placeholder(self):
+        _forward_event(self.particle_logger, SAMPLE_EVENT, {})
+        attrs = self._attrs()
+        self.assertEqual(attrs["device_name"], DEVICE_FIELD_MISSING)
+        self.assertEqual(attrs["device_groups"], DEVICE_FIELD_MISSING)
+
+    def test_partial_device_fields_are_placeholder(self):
+        devices = {SAMPLE_EVENT["coreid"]: {"id": SAMPLE_EVENT["coreid"]}}
+        _forward_event(self.particle_logger, SAMPLE_EVENT, devices)
+        attrs = self._attrs()
+        self.assertEqual(attrs["device_name"], DEVICE_FIELD_MISSING)
+        self.assertEqual(attrs["device_groups"], DEVICE_FIELD_MISSING)
+
+
 def _stderr_stream_handlers(logger):
     return [h for h in logger.handlers if type(h) is logging.StreamHandler]
 
@@ -309,6 +360,155 @@ class LiveOtlpTests(unittest.TestCase):
         finally:
             provider.shutdown()
             _quiet_tool_loggers()
+
+
+class FetchProductDevicesTests(unittest.TestCase):
+    def setUp(self):
+        _quiet_tool_loggers()
+
+    def tearDown(self):
+        _quiet_tool_loggers()
+
+    def _json_response(self, payload, status_code=200):
+        response = MagicMock()
+        response.ok = status_code == 200
+        response.status_code = status_code
+        response.reason = "OK" if status_code == 200 else "Error"
+        response.json.return_value = payload
+        response.content = json.dumps(payload).encode()
+        if status_code != 200:
+            response.raise_for_status.side_effect = _forwarder.requests.HTTPError(
+                f"{status_code} Error"
+            )
+        return response
+
+    def test_single_page_does_not_fetch_more(self):
+        payload = {
+            "devices": [{"id": "a"}, {"id": "b"}],
+            "meta": {"total_pages": 1, "total_records": 11148},
+        }
+        with patch.object(_forwarder.requests, "get", return_value=self._json_response(payload)) as get:
+            devices = fetch_product_devices("13961", {"Authorization": "Bearer t"})
+        self.assertEqual(devices, payload["devices"])
+        self.assertEqual(get.call_count, 1)
+        url = get.call_args.args[0]
+        self.assertIn(f"{PARTICLE_API_BASE}/products/13961/devices", url)
+        query = parse_qs(urlparse(url).query)
+        self.assertEqual(query["perPage"], [str(DEVICES_PER_PAGE)])
+        self.assertEqual(query["page"], ["1"])
+
+    def test_pages_when_total_records_exceeds_per_page(self):
+        page1 = {
+            "devices": [{"id": "p1"}],
+            "meta": {"total_pages": 2, "total_records": DEVICES_PER_PAGE + 1},
+        }
+        page2 = {
+            "devices": [{"id": "p2"}],
+            "meta": {"total_pages": 2, "total_records": DEVICES_PER_PAGE + 1},
+        }
+
+        def fake_get(url, headers=None):
+            page = parse_qs(urlparse(url).query)["page"][0]
+            if page == "1":
+                return self._json_response(page1)
+            if page == "2":
+                return self._json_response(page2)
+            self.fail(f"unexpected page {page}")
+
+        with patch.object(_forwarder.requests, "get", side_effect=fake_get) as get:
+            devices = fetch_product_devices("13961", {"Authorization": "Bearer t"})
+        self.assertEqual(devices, [{"id": "p1"}, {"id": "p2"}])
+        self.assertEqual(get.call_count, 2)
+
+    def test_replace_is_visible_on_snapshot(self):
+        device_list = DeviceList()
+        self.assertEqual(device_list.snapshot(), {})
+        incoming = [{"id": "a", "name": "one"}, {"id": "b", "name": "two"}]
+        device_list.replace(incoming)
+        incoming.append({"id": "c"})
+        self.assertEqual(
+            device_list.snapshot(),
+            {"a": {"id": "a", "name": "one"}, "b": {"id": "b", "name": "two"}},
+        )
+
+    def test_snapshot_if_newer_skips_copy_until_replace(self):
+        device_list = DeviceList()
+        gen, updated = device_list.snapshot_if_newer(0)
+        self.assertEqual(gen, 0)
+        self.assertIsNone(updated)
+
+        device_list.replace([{"id": "a"}])
+        gen, updated = device_list.snapshot_if_newer(0)
+        self.assertEqual(gen, 1)
+        self.assertEqual(updated, {"a": {"id": "a"}})
+
+        gen, updated = device_list.snapshot_if_newer(gen)
+        self.assertEqual(gen, 1)
+        self.assertIsNone(updated)
+
+        device_list.replace([{"id": "b"}])
+        gen, updated = device_list.snapshot_if_newer(gen)
+        self.assertEqual(gen, 2)
+        self.assertEqual(updated, {"b": {"id": "b"}})
+
+    def test_unchanged_check_does_not_take_lock(self):
+        device_list = DeviceList()
+        device_list.replace([{"id": "a"}])
+        gen = device_list.generation()
+        self.assertFalse(device_list.has_newer(gen))
+
+        class _LockProbe:
+            def __enter__(self):
+                raise AssertionError("lock should not be acquired")
+
+            def __exit__(self, *args):
+                return False
+
+        device_list._lock = _LockProbe()
+        self.assertFalse(device_list.has_newer(gen))
+        self.assertEqual(device_list.generation(), gen)
+        seen, updated = device_list.snapshot_if_newer(gen)
+        self.assertEqual(seen, gen)
+        self.assertIsNone(updated)
+
+    def test_refresh_loop_publishes_to_device_list(self):
+        device_list = DeviceList()
+        stop = threading.Event()
+        published = [{"id": "dev-1"}]
+
+        def fake_fetch(product_id, headers):
+            stop.set()
+            return published
+
+        with patch.object(_forwarder, "fetch_product_devices", side_effect=fake_fetch):
+            with patch.object(_forwarder, "DEVICE_REFRESH_INTERVAL_S", 0):
+                _forwarder._device_refresh_loop("13961", {}, stop, device_list)
+        self.assertEqual(device_list.snapshot(), {"dev-1": {"id": "dev-1"}})
+
+    def test_initial_refresh_fills_device_list(self):
+        device_list = DeviceList()
+        published = [{"id": "startup"}]
+        with patch.object(
+            _forwarder, "fetch_product_devices", return_value=published
+        ) as fetch:
+            _forwarder._refresh_device_list("13961", {}, device_list)
+        fetch.assert_called_once_with("13961", {})
+        self.assertEqual(device_list.snapshot(), {"startup": {"id": "startup"}})
+
+    def test_run_exits_when_initial_device_pull_fails(self):
+        with patch.dict(
+            os.environ,
+            {"PARTICLE_PRODUCT_ID": "13961", "PARTICLE_AUTH_TOKEN": "token"},
+            clear=False,
+        ):
+            with patch.object(
+                _forwarder,
+                "_refresh_device_list",
+                side_effect=_forwarder.requests.ConnectionError("down"),
+            ):
+                with self.assertRaises(SystemExit) as cm:
+                    _forwarder._run(logging.getLogger("tool"), logging.getLogger("particle"))
+        self.assertEqual(cm.exception.code, 1)
 
 
 if __name__ == "__main__":

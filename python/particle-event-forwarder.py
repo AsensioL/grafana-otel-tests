@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import sys
+import threading
 from typing import Optional
 
 import requests
@@ -22,6 +23,10 @@ PARTICLE_LOGGER_NAME = "tool.particle"
 DEFAULT_OTLP_ENDPOINT = "http://127.0.0.1:4317"
 SERVICE_NAME = "particle-event-forwarder"
 CONSOLE_ENV = "TOOL_INTERNAL_CONSOLE"
+PARTICLE_API_BASE = "https://api.particle.io/v1"
+DEVICES_PER_PAGE = 20000
+DEVICE_REFRESH_INTERVAL_S = 24 * 60 * 60
+DEVICE_FIELD_MISSING = "NA!"
 CODE_LOCATION_ATTRS = (
     "code.file.path",
     "code.function.name",
@@ -188,12 +193,166 @@ class ParticleEventParser:
         return self.parsed_events.pop(0)
 
 
-def _forward_event(particle_logger, ev: dict) -> None:
+class _PublishedDeviceList:
+    """Immutable generation + id-indexed devices; swapped as a single pointer."""
+
+    __slots__ = ("generation", "devices")
+
+    def __init__(self, generation: int, devices: dict):
+        self.generation = generation
+        self.devices = devices
+
+
+def _index_devices(devices: list) -> dict:
+    indexed = {}
+    for device in devices:
+        device_id = device.get("id")
+        if device_id is None:
+            continue
+        indexed[device_id] = device
+    return indexed
+
+
+class DeviceList:
+    """Product devices shared between the refresh thread and the main thread.
+
+    The main thread checks `has_newer()` / `generation()` with no lock. A
+    successful `replace()` publishes a new id-keyed dict and bumps the
+    generation; only then does `snapshot_if_newer()` take the lock to copy.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._published = _PublishedDeviceList(0, {})
+
+    def replace(self, devices: list) -> None:
+        by_id = _index_devices(devices)
+        with self._lock:
+            next_gen = self._published.generation + 1
+            self._published = _PublishedDeviceList(next_gen, by_id)
+
+    def generation(self) -> int:
+        return self._published.generation
+
+    def has_newer(self, seen_generation: int) -> bool:
+        return self._published.generation != seen_generation
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return dict(self._published.devices)
+
+    def snapshot_if_newer(self, seen_generation: int) -> tuple[int, Optional[dict]]:
+        published = self._published
+        if published.generation == seen_generation:
+            return seen_generation, None
+        with self._lock:
+            published = self._published
+            if published.generation == seen_generation:
+                return seen_generation, None
+            return published.generation, dict(published.devices)
+
+
+def fetch_product_devices(product_id: str, headers: dict) -> list:
+    """Fetch the product device list, paging when total_records exceeds perPage."""
+    logger = logging.getLogger(TOOL_LOGGER_NAME)
+    devices = []
+    page = 1
+    total_pages = 1
+
+    while page <= total_pages:
+        url = (
+            f"{PARTICLE_API_BASE}/products/{product_id}/devices"
+            f"?perPage={DEVICES_PER_PAGE}&page={page}"
+        )
+        response = requests.get(url, headers=headers)
+        if not response.ok:
+            body = response.content[:500].decode("utf-8", errors="replace")
+            logger.error(
+                "Product device list request failed: HTTP %s %s body=%s",
+                response.status_code,
+                response.reason,
+                body,
+            )
+            response.raise_for_status()
+
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Product device list response is not a JSON object")
+
+        page_devices = payload.get("devices") or []
+        if not isinstance(page_devices, list):
+            raise ValueError("Product device list 'devices' field is not an array")
+        devices.extend(page_devices)
+
+        if page == 1:
+            meta = payload.get("meta") or {}
+            if not isinstance(meta, dict):
+                meta = {}
+            total_records = meta.get("total_records") or 0
+            # meta looks like {'total_pages': 1, 'total_records': 11148}
+            if total_records > DEVICES_PER_PAGE:
+                reported_pages = meta.get("total_pages") or 0
+                needed_pages = (
+                    total_records + DEVICES_PER_PAGE - 1
+                ) // DEVICES_PER_PAGE
+                total_pages = max(int(reported_pages), needed_pages)
+
+        page += 1
+
+    logger.info("Fetched %s product devices", len(devices))
+    return devices
+
+
+def _refresh_device_list(
+    product_id: str, headers: dict, device_list: DeviceList
+) -> None:
+    devices = fetch_product_devices(product_id, headers)
+    device_list.replace(devices)
+
+
+def _device_refresh_loop(
+    product_id: str,
+    headers: dict,
+    stop_event: threading.Event,
+    device_list: DeviceList,
+) -> None:
+    logger = logging.getLogger(TOOL_LOGGER_NAME)
+    # Initial fetch runs on the main thread before the event stream starts.
+    while not stop_event.wait(DEVICE_REFRESH_INTERVAL_S):
+        try:
+            _refresh_device_list(product_id, headers, device_list)
+        except (requests.RequestException, ValueError, json.JSONDecodeError) as exc:
+            logger.error("Product device list request failed: %s", exc)
+
+
+def _device_name_and_groups(devices: dict, coreid) -> tuple[str, str]:
+    device = devices.get(coreid) if coreid else None
+    if not isinstance(device, dict):
+        return DEVICE_FIELD_MISSING, DEVICE_FIELD_MISSING
+
+    name = device.get("name")
+    if not isinstance(name, str):
+        name = DEVICE_FIELD_MISSING
+
+    groups = device.get("groups")
+    if not isinstance(groups, list):
+        groups_text = DEVICE_FIELD_MISSING
+    else:
+        groups_text = ",".join(str(group) for group in groups)
+
+    return name, groups_text
+
+
+def _forward_event(particle_logger, ev: dict, devices: dict) -> None:
+    coreid = ev.get("coreid", "")
+    device_name, device_groups = _device_name_and_groups(devices, coreid)
     extra = {
         "publish_time": ev.get("published_at", ""),
-        "device_id": ev.get("coreid", ""),
+        "device_id": coreid,
         "device_version": ev.get("version", ""),
         "event_name": ev.get("name", ""),
+        "device_name": device_name,
+        "device_groups": device_groups,
     }
     particle_logger.info(ev.get("data", ""), extra=extra)
 
@@ -204,36 +363,67 @@ def _run(tool_logger, particle_logger) -> None:
     streaming_endpoint = f"https://api.particle.io/v1/products/{product_id}/events/"
     headers = {"Authorization": "Bearer " + auth_token}
     pep = ParticleEventParser()
-
+    device_list = DeviceList()
     try:
-        response = requests.get(streaming_endpoint, headers=headers, stream=True)
-    except requests.RequestException as exc:
-        tool_logger.error("Particle stream request failed: %s", exc)
+        _refresh_device_list(product_id, headers, device_list)
+    except (requests.RequestException, ValueError, json.JSONDecodeError) as exc:
+        tool_logger.error("Product device list request failed: %s", exc)
         sys.exit(1)
 
-    with response as r:
-        if not r.ok:
-            body = r.content[:500].decode("utf-8", errors="replace")
-            tool_logger.error(
-                "Particle stream request failed: HTTP %s %s body=%s",
-                r.status_code,
-                r.reason,
-                body,
-            )
+    stop_refresh = threading.Event()
+    refresh_thread = threading.Thread(
+        target=_device_refresh_loop,
+        args=(product_id, headers, stop_refresh, device_list),
+        name="particle-device-refresh",
+        daemon=True,
+    )
+    refresh_thread.start()
+
+    try:
+        try:
+            response = requests.get(streaming_endpoint, headers=headers, stream=True)
+        except requests.RequestException as exc:
+            tool_logger.error("Particle stream request failed: %s", exc)
             sys.exit(1)
 
-        tool_logger.info("Connection established, parsing events...")
+        with response as r:
+            if not r.ok:
+                body = r.content[:500].decode("utf-8", errors="replace")
+                tool_logger.error(
+                    "Particle stream request failed: HTTP %s %s body=%s",
+                    r.status_code,
+                    r.reason,
+                    body,
+                )
+                sys.exit(1)
 
-        for raw_chunk in r.iter_content(chunk_size=8192):
-            # Received raw_chunk looks like this:
-            #   event: HttpRequestStatistics
-            #   data: {"data":"...","ttl":60,"published_at":"...","coreid":"...","userid":"...","version":91,"public":false,"productID":13961}
-            #
-            # Note that 'data' is not necessarily JSON formatted
+            tool_logger.info("Connection established, parsing events...")
 
-            pep.feed(raw_chunk)
-            while (ev := pep.pull()) is not None:
-                _forward_event(particle_logger, ev)
+            seen_generation = 0
+            devices = {}
+            seen_generation, devices = device_list.snapshot_if_newer(seen_generation)
+            if devices is None:
+                devices = {}
+
+            for raw_chunk in r.iter_content(chunk_size=8192):
+                # Received raw_chunk looks like this:
+                #   event: HttpRequestStatistics
+                #   data: {"data":"...","ttl":60,"published_at":"...","coreid":"...","userid":"...","version":91,"public":false,"productID":13961}
+                #
+                # Note that 'data' is not necessarily JSON formatted
+
+                if device_list.has_newer(seen_generation):
+                    seen_generation, updated = device_list.snapshot_if_newer(
+                        seen_generation
+                    )
+                    if updated is not None:
+                        devices = updated
+
+                pep.feed(raw_chunk)
+                while (ev := pep.pull()) is not None:
+                    _forward_event(particle_logger, ev, devices)
+    finally:
+        stop_refresh.set()
 
 
 def main() -> None:
