@@ -37,6 +37,7 @@ compactor:
 
 limits_config:
   retention_period: 1440h
+  max_query_series: 5000
 
 # disable reporting
 analytics:
