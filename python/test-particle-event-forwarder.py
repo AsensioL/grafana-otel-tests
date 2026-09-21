@@ -39,6 +39,8 @@ DeviceList = _forwarder.DeviceList
 configure_logging = _forwarder.configure_logging
 fetch_product_devices = _forwarder.fetch_product_devices
 _forward_event = _forwarder._forward_event
+_parse_webhook_response_event = _forwarder._parse_webhook_response_event
+_is_hook_sent_event = _forwarder._is_hook_sent_event
 DEVICE_FIELD_MISSING = _forwarder.DEVICE_FIELD_MISSING
 require_env = _forwarder.require_env
 DEVICES_PER_PAGE = _forwarder.DEVICES_PER_PAGE
@@ -277,6 +279,131 @@ class ForwardEventTests(unittest.TestCase):
         attrs = self._attrs()
         self.assertEqual(attrs["device_name"], DEVICE_FIELD_MISSING)
         self.assertEqual(attrs["device_groups"], DEVICE_FIELD_MISSING)
+
+    def test_webhook_response_without_coreid_parses_event_name(self):
+        device_id = SAMPLE_EVENT["coreid"]
+        ev = dict(
+            SAMPLE_EVENT,
+            coreid="particle-internal",
+            name=f"{device_id}/hook-response/HttpWatchdog/0",
+        )
+        devices = {
+            device_id: {
+                "id": device_id,
+                "name": "front-door",
+                "groups": ["prod"],
+            }
+        }
+        _forward_event(self.particle_logger, ev, devices)
+        attrs = self._attrs()
+        self.assertEqual(attrs["device_id"], device_id)
+        self.assertEqual(attrs["event_name"], "HttpWatchdog")
+        self.assertEqual(attrs["event_type"], "hook-response")
+        self.assertEqual(attrs["attempt"], 0)
+        self.assertEqual(attrs["device_name"], "front-door")
+        self.assertEqual(attrs["device_groups"], "prod")
+
+    def test_webhook_response_event_name_may_contain_slashes(self):
+        device_id = SAMPLE_EVENT["coreid"]
+        ev = dict(
+            SAMPLE_EVENT,
+            coreid="particle-internal",
+            name=f"{device_id}/hook-response/spark/device/last_reset/2",
+        )
+        _forward_event(self.particle_logger, ev, {})
+        attrs = self._attrs()
+        self.assertEqual(attrs["device_id"], device_id)
+        self.assertEqual(attrs["event_type"], "hook-response")
+        self.assertEqual(attrs["event_name"], "spark/device/last_reset")
+        self.assertEqual(attrs["attempt"], 2)
+
+    def test_hook_sent_two_part_name_is_not_logged(self):
+        ev = dict(SAMPLE_EVENT, name="hook-sent/AF-Access")
+        _forward_event(self.particle_logger, ev, {})
+        self.assertEqual(len(self.exporter.get_finished_logs()), 0)
+
+    def test_hook_sent_special_event_is_not_logged(self):
+        device_id = SAMPLE_EVENT["coreid"]
+        ev = dict(
+            SAMPLE_EVENT,
+            coreid="particle-internal",
+            name=f"{device_id}/hook-sent/AF-Telemetry/0",
+        )
+        _forward_event(self.particle_logger, ev, {})
+        self.assertEqual(len(self.exporter.get_finished_logs()), 0)
+
+    def test_webhook_pattern_ignored_when_coreid_present(self):
+        ev = dict(
+            SAMPLE_EVENT,
+            name=f"{SAMPLE_EVENT['coreid']}/hook-response/HttpWatchdog/0",
+        )
+        _forward_event(self.particle_logger, ev, {})
+        attrs = self._attrs()
+        self.assertEqual(attrs["device_id"], SAMPLE_EVENT["coreid"])
+        self.assertEqual(
+            attrs["event_name"],
+            f"{SAMPLE_EVENT['coreid']}/hook-response/HttpWatchdog/0",
+        )
+        self.assertNotIn("hook_type", attrs)
+        self.assertNotIn("attempt", attrs)
+
+    def test_empty_coreid_without_webhook_pattern_is_unchanged(self):
+        ev = dict(SAMPLE_EVENT, coreid="", name="HttpWatchdog")
+        _forward_event(self.particle_logger, ev, {})
+        attrs = self._attrs()
+        self.assertEqual(attrs["device_id"], "")
+        self.assertEqual(attrs["event_name"], "HttpWatchdog")
+        self.assertNotIn("hook_type", attrs)
+        self.assertNotIn("attempt", attrs)
+
+
+class ParseWebhookResponseEventTests(unittest.TestCase):
+    def test_parses_four_segment_name(self):
+        parsed = _parse_webhook_response_event(
+            "e00fce682e79a004f1e69a2b/hook-response/HttpWatchdog/0"
+        )
+        self.assertEqual(
+            parsed,
+            {
+                "device_id": "e00fce682e79a004f1e69a2b",
+                "hook_type": "hook-response",
+                "event_name": "HttpWatchdog",
+                "attempt": 0,
+            },
+        )
+
+    def test_rejects_non_matching_names(self):
+        self.assertIsNone(_parse_webhook_response_event(""))
+        self.assertIsNone(_parse_webhook_response_event("HttpWatchdog"))
+        self.assertIsNone(_parse_webhook_response_event("id/hook-response/event"))
+        self.assertIsNone(_parse_webhook_response_event("id/hook-response/event/x"))
+
+
+class HookSentEventFilterTests(unittest.TestCase):
+    def test_detects_hook_sent_names(self):
+        self.assertTrue(_is_hook_sent_event("hook-sent/AF-Access"))
+        self.assertTrue(_is_hook_sent_event("hook-sent/AF-V2-SetManifest"))
+        self.assertTrue(
+            _is_hook_sent_event("e00fce682e79a004f1e69a2b/hook-sent/AF-Telemetry/0")
+        )
+        webhook = {
+            "device_id": "d",
+            "hook_type": "hook-sent",
+            "event_name": "AF-Access",
+            "attempt": 0,
+        }
+        self.assertTrue(_is_hook_sent_event("d/hook-sent/AF-Access/0", webhook))
+
+    def test_keeps_hook_response_and_normal_names(self):
+        self.assertFalse(_is_hook_sent_event("HttpWatchdog"))
+        self.assertFalse(_is_hook_sent_event("hook-response/AF-Access/0"))
+        webhook = {
+            "device_id": "d",
+            "hook_type": "hook-response",
+            "event_name": "AF-Access",
+            "attempt": 0,
+        }
+        self.assertFalse(_is_hook_sent_event("d/hook-response/AF-Access/0", webhook))
 
 
 def _stderr_stream_handlers(logger):

@@ -2,6 +2,7 @@
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -33,6 +34,12 @@ STREAM_READ_TIMEOUT_S = 120.0
 STREAM_RETRY_INITIAL_S = 1.0
 STREAM_RETRY_MAX_S = 60.0
 DEVICE_FIELD_MISSING = "NA!"
+# Particle webhook responses have an empty coreid; the SSE event name is
+# "{device_id}/{hook_type}/{event_name}/{attempt}".
+WEBHOOK_RESPONSE_EVENT_RE = re.compile(
+    r"(?P<device_id>[^/]+)/(?P<hook_type>[^/]+)/(?P<event_name>.+)/(?P<attempt>\d+)$"
+)
+HOOK_SENT_EVENT_RE = re.compile(r"(?:^|/)hook-sent/")
 CODE_LOCATION_ATTRS = (
     "code.file.path",
     "code.function.name",
@@ -331,14 +338,18 @@ def _device_refresh_loop(
             logger.error("Product device list request failed: %s", exc)
 
 
-def _device_name_and_groups(devices: dict, coreid) -> tuple[str, str]:
-    device = devices.get(coreid) if coreid else None
+def _device_name_and_groups(devices: dict, device_id) -> tuple[str, str]:
+    device = devices.get(device_id) if device_id else None
     if not isinstance(device, dict):
-        return DEVICE_FIELD_MISSING, DEVICE_FIELD_MISSING
+        return DEVICE_FIELD_MISSING, DEVICE_FIELD_MISSING, 0
 
     name = device.get("name")
     if not isinstance(name, str):
         name = DEVICE_FIELD_MISSING
+
+    device_version = device.get("firmware_version")
+    if not isinstance(device_version, int):
+        device_version = 0
 
     groups = device.get("groups")
     if not isinstance(groups, list):
@@ -346,7 +357,7 @@ def _device_name_and_groups(devices: dict, coreid) -> tuple[str, str]:
     else:
         groups_text = ",".join(str(group) for group in groups)
 
-    return name, groups_text
+    return name, groups_text, device_version
 
 
 def _next_stream_retry_delay(current: float) -> float:
@@ -382,17 +393,57 @@ def _iter_stream_events(
     return seen_generation, devices, got_data
 
 
+def _parse_webhook_response_event(event_name: str) -> Optional[dict]:
+    if not event_name:
+        return None
+    match = WEBHOOK_RESPONSE_EVENT_RE.fullmatch(event_name)
+    if not match:
+        return None
+    return {
+        "device_id": match.group("device_id"),
+        "event_name": match.group("event_name"),
+        "hook_type": match.group("hook_type"),
+        "attempt": int(match.group("attempt")),
+    }
+
+
+def _is_hook_sent_event(event_name: str, webhook: Optional[dict] = None) -> bool:
+    if webhook is not None and webhook["hook_type"] == "hook-sent":
+        return True
+    return bool(event_name) and HOOK_SENT_EVENT_RE.search(event_name) is not None
+
+
 def _forward_event(particle_logger, ev: dict, devices: dict) -> None:
-    coreid = ev.get("coreid", "")
-    device_name, device_groups = _device_name_and_groups(devices, coreid)
+    device_id = ev.get("coreid")
+    event_name = ev.get("name", "")
     extra = {
         "publish_time": ev.get("published_at", ""),
-        "device_id": coreid,
+        "device_id": device_id,
         "device_version": ev.get("version", ""),
-        "event_name": ev.get("name", ""),
-        "device_name": device_name,
-        "device_groups": device_groups,
+        "event_name": event_name,
+        "event_type": "publish",
     }
+    webhook = None
+    if device_id == "particle-internal":
+        webhook = _parse_webhook_response_event(event_name)
+        if webhook is not None:
+            device_id = webhook["device_id"]
+            extra["device_id"] = device_id
+            extra["original_event_name"] = event_name
+            extra["event_name"] = webhook["event_name"]
+            extra["event_type"] = webhook["hook_type"]
+            extra["attempt"] = webhook["attempt"]
+    if _is_hook_sent_event(event_name, webhook):
+        # hook-sent events don't contain any useful metadata so they only
+        # contribute noise
+        return
+    device_name, device_groups, saved_device_version = _device_name_and_groups(devices, device_id)
+    extra["device_name"] = device_name
+    extra["device_groups"] = device_groups
+    # hook-events (with device-id = particle-internal) do not show device version -> Use cached
+    if webhook is not None:
+        extra["device_version"] = saved_device_version
+
     particle_logger.info(ev.get("data", ""), extra=extra)
 
 
