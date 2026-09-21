@@ -8,9 +8,26 @@ otelcol.receiver.otlp "default" {
   }
 
   output {
-    logs    = [otelcol.exporter.loki.default.input]
+    /* Promote event_name to a Loki stream label; device fields become structured metadata in loki.process */
+    logs    = [otelcol.processor.transform.logs.input]
     metrics = [otelcol.exporter.prometheus.default.input]
     traces  = [otelcol.exporter.otlp.tempo.input]
+  }
+}
+
+otelcol.processor.transform "logs" {
+  error_mode = "ignore"
+
+  log_statements {
+    context = "log"
+
+    statements = [
+      `set(log.attributes["loki.attribute.labels"], "event_name,event_type")`,
+    ]
+  }
+
+  output {
+    logs = [otelcol.exporter.loki.default.input]
   }
 }
 
@@ -19,6 +36,28 @@ otelcol.exporter.prometheus "default" {
 }
 
 otelcol.exporter.loki "default" {
+  forward_to = [loki.process.structured_metadata.receiver]
+}
+
+loki.process "structured_metadata" {
+  stage.json {
+    expressions = {
+      device_id      = "attributes.device_id",
+      device_version = "attributes.device_version",
+      device_name    = "attributes.device_name",
+      device_groups  = "attributes.device_groups",
+    }
+  }
+
+  stage.structured_metadata {
+    values = {
+      device_id      = "",
+      device_version = "",
+      device_name    = "",
+      device_groups  = "",
+    }
+  }
+
   forward_to = [loki.write.default.receiver]
 }
 
