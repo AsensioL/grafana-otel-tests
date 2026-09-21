@@ -2,6 +2,9 @@ auth_enabled: false
 
 server:
   http_listen_port: 3100
+  # Default 4MiB; querier→frontend replies were exceeding it (~4.5MiB).
+  grpc_server_max_recv_msg_size: 33554432
+  grpc_server_max_send_msg_size: 33554432
 
 common:
   instance_addr: 0.0.0.0
@@ -37,7 +40,9 @@ compactor:
 
 limits_config:
   retention_period: 1440h
-  max_query_series: 5000
+  max_query_series: 12000
+  max_global_streams_per_user: 50000
+  max_entries_limit_per_query: 50000
 
 # disable reporting
 analytics:

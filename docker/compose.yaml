@@ -65,7 +65,10 @@ services:
   loki:
     image: grafana/loki:3.6
     restart: unless-stopped
-    mem_limit: 768m
+    mem_limit: 4g
+    environment:
+      # Soft cap so Go GCs before Docker OOM-kills the container.
+      GOMEMLIMIT: 3600MiB
     # command: -config.file=/etc/loki/local-config.yaml
     command: -config.file=/etc/loki/loki.yml
     volumes:
