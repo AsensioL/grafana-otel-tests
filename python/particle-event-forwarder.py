@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from typing import Optional
 
 import requests
@@ -26,6 +27,11 @@ CONSOLE_ENV = "TOOL_INTERNAL_CONSOLE"
 PARTICLE_API_BASE = "https://api.particle.io/v1"
 DEVICES_PER_PAGE = 20000
 DEVICE_REFRESH_INTERVAL_S = 24 * 60 * 60
+STREAM_CONNECT_TIMEOUT_S = 30.0
+# Read timeout also covers a half-open socket after the laptop sleeps.
+STREAM_READ_TIMEOUT_S = 120.0
+STREAM_RETRY_INITIAL_S = 1.0
+STREAM_RETRY_MAX_S = 60.0
 DEVICE_FIELD_MISSING = "NA!"
 CODE_LOCATION_ATTRS = (
     "code.file.path",
@@ -343,6 +349,39 @@ def _device_name_and_groups(devices: dict, coreid) -> tuple[str, str]:
     return name, groups_text
 
 
+def _next_stream_retry_delay(current: float) -> float:
+    return min(current * 2, STREAM_RETRY_MAX_S)
+
+
+def _iter_stream_events(
+    response,
+    pep: ParticleEventParser,
+    device_list: DeviceList,
+    particle_logger,
+    seen_generation: int,
+    devices: dict,
+) -> tuple[int, dict, bool]:
+    """Consume one SSE response. Returns (generation, devices, got_data)."""
+    got_data = False
+    for raw_chunk in response.iter_content(chunk_size=8192):
+        # Received raw_chunk looks like this:
+        #   event: HttpRequestStatistics
+        #   data: {"data":"...","ttl":60,"published_at":"...","coreid":"...","userid":"...","version":91,"public":false,"productID":13961}
+        #
+        # Note that 'data' is not necessarily JSON formatted
+        got_data = True
+
+        if device_list.has_newer(seen_generation):
+            seen_generation, updated = device_list.snapshot_if_newer(seen_generation)
+            if updated is not None:
+                devices = updated
+
+        pep.feed(raw_chunk)
+        while (ev := pep.pull()) is not None:
+            _forward_event(particle_logger, ev, devices)
+    return seen_generation, devices, got_data
+
+
 def _forward_event(particle_logger, ev: dict, devices: dict) -> None:
     coreid = ev.get("coreid", "")
     device_name, device_groups = _device_name_and_groups(devices, coreid)
@@ -362,7 +401,6 @@ def _run(tool_logger, particle_logger) -> None:
     auth_token = require_env("PARTICLE_AUTH_TOKEN")
     streaming_endpoint = f"https://api.particle.io/v1/products/{product_id}/events/"
     headers = {"Authorization": "Bearer " + auth_token}
-    pep = ParticleEventParser()
     device_list = DeviceList()
     try:
         _refresh_device_list(product_id, headers, device_list)
@@ -379,49 +417,75 @@ def _run(tool_logger, particle_logger) -> None:
     )
     refresh_thread.start()
 
+    retry_s = STREAM_RETRY_INITIAL_S
+    seen_generation = 0
+    devices = {}
+    seen_generation, snapshot = device_list.snapshot_if_newer(seen_generation)
+    if snapshot is not None:
+        devices = snapshot
+
     try:
-        try:
-            response = requests.get(streaming_endpoint, headers=headers, stream=True)
-        except requests.RequestException as exc:
-            tool_logger.error("Particle stream request failed: %s", exc)
-            sys.exit(1)
-
-        with response as r:
-            if not r.ok:
-                body = r.content[:500].decode("utf-8", errors="replace")
-                tool_logger.error(
-                    "Particle stream request failed: HTTP %s %s body=%s",
-                    r.status_code,
-                    r.reason,
-                    body,
+        while True:
+            pep = ParticleEventParser()
+            try:
+                response = requests.get(
+                    streaming_endpoint,
+                    headers=headers,
+                    stream=True,
+                    timeout=(STREAM_CONNECT_TIMEOUT_S, STREAM_READ_TIMEOUT_S),
                 )
-                sys.exit(1)
+            except requests.RequestException as exc:
+                tool_logger.error(
+                    "Particle stream request failed: %s; retrying in %.0fs",
+                    exc,
+                    retry_s,
+                )
+                time.sleep(retry_s)
+                retry_s = _next_stream_retry_delay(retry_s)
+                continue
 
-            tool_logger.info("Connection established, parsing events...")
-
-            seen_generation = 0
-            devices = {}
-            seen_generation, devices = device_list.snapshot_if_newer(seen_generation)
-            if devices is None:
-                devices = {}
-
-            for raw_chunk in r.iter_content(chunk_size=8192):
-                # Received raw_chunk looks like this:
-                #   event: HttpRequestStatistics
-                #   data: {"data":"...","ttl":60,"published_at":"...","coreid":"...","userid":"...","version":91,"public":false,"productID":13961}
-                #
-                # Note that 'data' is not necessarily JSON formatted
-
-                if device_list.has_newer(seen_generation):
-                    seen_generation, updated = device_list.snapshot_if_newer(
-                        seen_generation
+            with response as r:
+                if not r.ok:
+                    body = r.content[:500].decode("utf-8", errors="replace")
+                    tool_logger.error(
+                        "Particle stream request failed: HTTP %s %s body=%s",
+                        r.status_code,
+                        r.reason,
+                        body,
                     )
-                    if updated is not None:
-                        devices = updated
+                    if r.status_code in (401, 403):
+                        sys.exit(1)
+                    time.sleep(retry_s)
+                    retry_s = _next_stream_retry_delay(retry_s)
+                    continue
 
-                pep.feed(raw_chunk)
-                while (ev := pep.pull()) is not None:
-                    _forward_event(particle_logger, ev, devices)
+                tool_logger.info("Connection established, parsing events...")
+                try:
+                    seen_generation, devices, got_data = _iter_stream_events(
+                        r,
+                        pep,
+                        device_list,
+                        particle_logger,
+                        seen_generation,
+                        devices,
+                    )
+                except requests.RequestException as exc:
+                    tool_logger.warning(
+                        "Particle stream disconnected: %s; reconnecting in %.0fs",
+                        exc,
+                        retry_s,
+                    )
+                    time.sleep(retry_s)
+                    retry_s = _next_stream_retry_delay(retry_s)
+                    continue
+
+            if got_data:
+                retry_s = STREAM_RETRY_INITIAL_S
+            tool_logger.warning(
+                "Particle event stream ended; reconnecting in %.0fs", retry_s
+            )
+            time.sleep(retry_s)
+            retry_s = _next_stream_retry_delay(retry_s)
     finally:
         stop_refresh.set()
 

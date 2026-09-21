@@ -510,6 +510,95 @@ class FetchProductDevicesTests(unittest.TestCase):
                     _forwarder._run(logging.getLogger("tool"), logging.getLogger("particle"))
         self.assertEqual(cm.exception.code, 1)
 
+    def _run_with_stream_gets(self, get_side_effect):
+        tool_logger = logging.getLogger("tool")
+        particle_logger = logging.getLogger("particle")
+        with patch.dict(
+            os.environ,
+            {"PARTICLE_PRODUCT_ID": "13961", "PARTICLE_AUTH_TOKEN": "token"},
+            clear=False,
+        ), patch.object(_forwarder, "_refresh_device_list"), patch.object(
+            _forwarder.time, "sleep"
+        ), patch.object(
+            _forwarder.requests, "get", side_effect=get_side_effect
+        ) as get:
+            try:
+                _forwarder._run(tool_logger, particle_logger)
+            except KeyboardInterrupt:
+                pass
+            return get
+
+    def test_run_reconnects_after_stream_ends(self):
+        forwarded = []
+
+        def capture(logger, ev, devices):
+            forwarded.append(ev)
+
+        first = MagicMock()
+        first.ok = True
+        first.status_code = 200
+        first.iter_content.return_value = iter(
+            [_sse("HttpRequestStatistics", SAMPLE_EVENT)]
+        )
+        first.__enter__.return_value = first
+        first.__exit__.return_value = False
+
+        with patch.object(_forwarder, "_forward_event", side_effect=capture):
+            get = self._run_with_stream_gets(
+                [first, KeyboardInterrupt("stop after reconnect")]
+            )
+        self.assertEqual(get.call_count, 2)
+        self.assertEqual(len(forwarded), 1)
+        self.assertEqual(forwarded[0]["coreid"], SAMPLE_EVENT["coreid"])
+        self.assertEqual(
+            get.call_args.kwargs["timeout"],
+            (_forwarder.STREAM_CONNECT_TIMEOUT_S, _forwarder.STREAM_READ_TIMEOUT_S),
+        )
+
+    def test_run_retries_stream_connect_error(self):
+        get = self._run_with_stream_gets(
+            [
+                _forwarder.requests.ConnectionError("refused"),
+                KeyboardInterrupt("stop after retry"),
+            ]
+        )
+        self.assertEqual(get.call_count, 2)
+
+    def test_run_reconnects_after_read_error(self):
+        first = MagicMock()
+        first.ok = True
+        first.status_code = 200
+        first.iter_content.side_effect = _forwarder.requests.ReadTimeout("idle")
+        first.__enter__.return_value = first
+        first.__exit__.return_value = False
+
+        get = self._run_with_stream_gets(
+            [first, KeyboardInterrupt("stop after disconnect")]
+        )
+        self.assertEqual(get.call_count, 2)
+
+    def test_run_exits_on_stream_http_401(self):
+        unauthorized = MagicMock()
+        unauthorized.ok = False
+        unauthorized.status_code = 401
+        unauthorized.reason = "Unauthorized"
+        unauthorized.content = b"nope"
+        unauthorized.__enter__.return_value = unauthorized
+        unauthorized.__exit__.return_value = False
+
+        with patch.dict(
+            os.environ,
+            {"PARTICLE_PRODUCT_ID": "13961", "PARTICLE_AUTH_TOKEN": "token"},
+            clear=False,
+        ), patch.object(_forwarder, "_refresh_device_list"), patch.object(
+            _forwarder.requests, "get", return_value=unauthorized
+        ):
+            with self.assertRaises(SystemExit) as cm:
+                _forwarder._run(
+                    logging.getLogger("tool"), logging.getLogger("particle")
+                )
+        self.assertEqual(cm.exception.code, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
