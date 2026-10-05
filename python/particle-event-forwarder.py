@@ -373,26 +373,33 @@ def _iter_stream_events(
     particle_logger,
     seen_generation: int,
     devices: dict,
-) -> tuple[int, dict, bool]:
-    """Consume one SSE response. Returns (generation, devices, got_data)."""
+) -> tuple[int, dict, bool, Optional[requests.RequestException]]:
+    """Consume one SSE response.
+
+    Returns (generation, devices, got_data, disconnect). ``disconnect`` is the
+    RequestException that ended the stream, when the read did not finish cleanly.
+    """
     got_data = False
-    for raw_chunk in response.iter_content(chunk_size=8192):
-        # Received raw_chunk looks like this:
-        #   event: HttpRequestStatistics
-        #   data: {"data":"...","ttl":60,"published_at":"...","coreid":"...","userid":"...","version":91,"public":false,"productID":13961}
-        #
-        # Note that 'data' is not necessarily JSON formatted
-        got_data = True
+    try:
+        for raw_chunk in response.iter_content(chunk_size=8192):
+            # Received raw_chunk looks like this:
+            #   event: HttpRequestStatistics
+            #   data: {"data":"...","ttl":60,"published_at":"...","coreid":"...","userid":"...","version":91,"public":false,"productID":13961}
+            #
+            # Note that 'data' is not necessarily JSON formatted
+            got_data = True
 
-        if device_list.has_newer(seen_generation):
-            seen_generation, updated = device_list.snapshot_if_newer(seen_generation)
-            if updated is not None:
-                devices = updated
+            if device_list.has_newer(seen_generation):
+                seen_generation, updated = device_list.snapshot_if_newer(seen_generation)
+                if updated is not None:
+                    devices = updated
 
-        pep.feed(raw_chunk)
-        while (ev := pep.pull()) is not None:
-            _forward_event(particle_logger, ev, devices)
-    return seen_generation, devices, got_data
+            pep.feed(raw_chunk)
+            while (ev := pep.pull()) is not None:
+                _forward_event(particle_logger, ev, devices)
+    except requests.RequestException as exc:
+        return seen_generation, devices, got_data, exc
+    return seen_generation, devices, got_data, None
 
 
 def _parse_webhook_response_event(event_name: str) -> Optional[dict]:
@@ -513,30 +520,29 @@ def _run(tool_logger, particle_logger) -> None:
                     continue
 
                 tool_logger.info("Connection established, parsing events...")
-                try:
-                    seen_generation, devices, got_data = _iter_stream_events(
-                        r,
-                        pep,
-                        device_list,
-                        particle_logger,
-                        seen_generation,
-                        devices,
-                    )
-                except requests.RequestException as exc:
-                    tool_logger.warning(
-                        "Particle stream disconnected: %s; reconnecting in %.0fs",
-                        exc,
-                        retry_s,
-                    )
-                    time.sleep(retry_s)
-                    retry_s = _next_stream_retry_delay(retry_s)
-                    continue
+                seen_generation, devices, got_data, disconnect = _iter_stream_events(
+                    r,
+                    pep,
+                    device_list,
+                    particle_logger,
+                    seen_generation,
+                    devices,
+                )
 
+            # Reset after delivered events: the SSE API does not replay a gap,
+            # so a live stream reconnects at the initial delay.
             if got_data:
                 retry_s = STREAM_RETRY_INITIAL_S
-            tool_logger.warning(
-                "Particle event stream ended; reconnecting in %.0fs", retry_s
-            )
+            if disconnect is not None:
+                tool_logger.warning(
+                    "Particle stream disconnected: %s; reconnecting in %.0fs",
+                    disconnect,
+                    retry_s,
+                )
+            else:
+                tool_logger.warning(
+                    "Particle event stream ended; reconnecting in %.0fs", retry_s
+                )
             time.sleep(retry_s)
             retry_s = _next_stream_retry_delay(retry_s)
     finally:

@@ -638,7 +638,11 @@ class FetchProductDevicesTests(unittest.TestCase):
                     _forwarder._run(logging.getLogger("tool"), logging.getLogger("particle"))
         self.assertEqual(cm.exception.code, 1)
 
-    def _run_with_stream_gets(self, get_side_effect):
+    def _run_with_stream_gets(self, get_side_effect, sleeps=None):
+        def record_sleep(delay):
+            if sleeps is not None:
+                sleeps.append(delay)
+
         tool_logger = logging.getLogger("tool")
         particle_logger = logging.getLogger("particle")
         with patch.dict(
@@ -646,7 +650,7 @@ class FetchProductDevicesTests(unittest.TestCase):
             {"PARTICLE_PRODUCT_ID": "13961", "PARTICLE_AUTH_TOKEN": "token"},
             clear=False,
         ), patch.object(_forwarder, "_refresh_device_list"), patch.object(
-            _forwarder.time, "sleep"
+            _forwarder.time, "sleep", side_effect=record_sleep
         ), patch.object(
             _forwarder.requests, "get", side_effect=get_side_effect
         ) as get:
@@ -704,6 +708,64 @@ class FetchProductDevicesTests(unittest.TestCase):
             [first, KeyboardInterrupt("stop after disconnect")]
         )
         self.assertEqual(get.call_count, 2)
+
+    def _live_then_drop_response(self):
+        response = MagicMock()
+        response.ok = True
+        response.status_code = 200
+
+        def chunks(chunk_size=8192):
+            yield _sse("HttpRequestStatistics", SAMPLE_EVENT)
+            raise _forwarder.requests.ReadTimeout("dropped")
+
+        response.iter_content.side_effect = chunks
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+        return response
+
+    def test_run_resets_retry_when_disconnect_follows_data(self):
+        sleeps = []
+        self._run_with_stream_gets(
+            [
+                self._live_then_drop_response(),
+                self._live_then_drop_response(),
+                KeyboardInterrupt("stop after repeated drops"),
+            ],
+            sleeps,
+        )
+        # Particle SSE does not replay events missed while backing off, so a
+        # drop after delivered traffic must reconnect at the initial delay.
+        self.assertEqual(
+            sleeps,
+            [
+                _forwarder.STREAM_RETRY_INITIAL_S,
+                _forwarder.STREAM_RETRY_INITIAL_S,
+            ],
+        )
+
+    def test_run_backs_off_when_read_error_has_no_data(self):
+        sleeps = []
+
+        def idle_timeout():
+            response = MagicMock()
+            response.ok = True
+            response.status_code = 200
+            response.iter_content.side_effect = _forwarder.requests.ReadTimeout("idle")
+            response.__enter__.return_value = response
+            response.__exit__.return_value = False
+            return response
+
+        self._run_with_stream_gets(
+            [idle_timeout(), idle_timeout(), KeyboardInterrupt("stop")],
+            sleeps,
+        )
+        self.assertEqual(
+            sleeps,
+            [
+                _forwarder.STREAM_RETRY_INITIAL_S,
+                _forwarder._next_stream_retry_delay(_forwarder.STREAM_RETRY_INITIAL_S),
+            ],
+        )
 
     def test_run_exits_on_stream_http_401(self):
         unauthorized = MagicMock()
