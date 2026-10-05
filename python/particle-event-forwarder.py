@@ -31,6 +31,8 @@ DEVICE_REFRESH_INTERVAL_S = 24 * 60 * 60
 STREAM_CONNECT_TIMEOUT_S = 30.0
 # Read timeout also covers a half-open socket after the laptop sleeps.
 STREAM_READ_TIMEOUT_S = 120.0
+# Connect and read timeout for the paged product device list.
+DEVICE_LIST_TIMEOUT_S = 30.0
 STREAM_RETRY_INITIAL_S = 1.0
 STREAM_RETRY_MAX_S = 60.0
 DEVICE_FIELD_MISSING = "NA!"
@@ -277,7 +279,7 @@ def fetch_product_devices(product_id: str, headers: dict) -> list:
             f"{PARTICLE_API_BASE}/products/{product_id}/devices"
             f"?perPage={DEVICES_PER_PAGE}&page={page}"
         )
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, timeout=DEVICE_LIST_TIMEOUT_S)
         if not response.ok:
             body = response.content[:500].decode("utf-8", errors="replace")
             logger.error(

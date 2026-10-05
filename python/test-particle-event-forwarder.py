@@ -523,6 +523,7 @@ class FetchProductDevicesTests(unittest.TestCase):
         query = parse_qs(urlparse(url).query)
         self.assertEqual(query["perPage"], [str(DEVICES_PER_PAGE)])
         self.assertEqual(query["page"], ["1"])
+        self.assertEqual(get.call_args.kwargs["timeout"], _forwarder.DEVICE_LIST_TIMEOUT_S)
 
     def test_pages_when_total_records_exceeds_per_page(self):
         page1 = {
@@ -534,7 +535,7 @@ class FetchProductDevicesTests(unittest.TestCase):
             "meta": {"total_pages": 2, "total_records": DEVICES_PER_PAGE + 1},
         }
 
-        def fake_get(url, headers=None):
+        def fake_get(url, headers=None, timeout=None):
             page = parse_qs(urlparse(url).query)["page"][0]
             if page == "1":
                 return self._json_response(page1)
